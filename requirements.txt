@@ -1,0 +1,7 @@
+google-generativeai
+sentence-transformers
+faiss-cpu
+PyPDF2
+numpy
+imaplib-status
+python-email-validator
