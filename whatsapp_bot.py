@@ -28,39 +28,71 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 def refresh_emails():
-    """Check for new emails and add them to the vector database"""
-    current_count = get_email_count()
-    new_emails = fetch_recent_emails()
+    """Check for new emails and update the vector database with only recent emails"""
+    try:
+        # Clear existing vector database
+        clear_vector_db()
+        logger.info("Cleared existing vector database")
+        
+        # Fetch 20 most recent emails
+        new_emails = fetch_recent_emails(max_emails=20)
+        
+        if not new_emails:
+            return "No emails found."
+        
+        # Add all recent emails to the database
+        for i, email in enumerate(new_emails):
+            doc_id = f"email_{i}"
+            add_document_to_vector_db(doc_id, email)
+        
+        return f"Updated database with {len(new_emails)} most recent emails"
     
-    if len(new_emails) <= current_count:
-        return "No new emails to add."
+    except Exception as e:
+        logger.error(f"Error refreshing emails: {str(e)}")
+        return "Error refreshing emails. Please try again."
+
+def split_long_message(message, limit=1500):
+    """
+    Split long messages into smaller chunks while preserving word boundaries
+    and adding continuation markers.
+    """
+    if len(message) <= limit:
+        return [message]
     
-    new_emails_to_add = new_emails[current_count:]
-    num_new_emails = len(new_emails_to_add)
+    chunks = []
+    current_chunk = ""
+    words = message.split()
     
-    if num_new_emails > 0:
-        for i, email in enumerate(new_emails_to_add):
-            email_text = f"""
-Subject: {email['subject']}
-From: {email['sender']}
-Date: {email['date']}
-Body:
-{email['body']}
-"""
-            doc_id = f"email_{get_email_count() + i}"
-            add_document_to_vector_db(doc_id, email_text)
-        return f"Added {num_new_emails} new {'email' if num_new_emails == 1 else 'emails'}"
-    return "Database is up to date"
+    for word in words:
+        if len(current_chunk) + len(word) + 1 <= limit:
+            current_chunk += " " + word if current_chunk else word
+        else:
+            # Add continuation marker to indicate there's more
+            chunks.append(current_chunk + " (continued...)")
+            current_chunk = word
+    
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    # Add part numbers for clarity
+    return [f"[Part {i+1}/{len(chunks)}]\n{chunk}" 
+            for i, chunk in enumerate(chunks)]
 
 def send_whatsapp_message(to_number, message):
-    """Send WhatsApp message using Twilio client"""
+    """Send WhatsApp message using Twilio client with support for long messages"""
     try:
-        message = client.messages.create(
-            from_=TWILIO_PHONE_NUMBER,
-            body=message,
-            to=f"whatsapp:{to_number}"
-        )
-        logger.debug(f"Message sent successfully: {message.sid}")
+        # Split long messages into chunks
+        message_chunks = split_long_message(message)
+        
+        # Send each chunk separately
+        for chunk in message_chunks:
+            message = client.messages.create(
+                from_=TWILIO_PHONE_NUMBER,
+                body=chunk,
+                to=f"whatsapp:{to_number}"
+            )
+            logger.debug(f"Message chunk sent successfully: {message.sid}")
+        
         return True
     except Exception as e:
         logger.error(f"Error sending message: {str(e)}")
@@ -91,8 +123,18 @@ def webhook():
                              "- Type 'clear' to reset conversation\n\n"
                              "What would you like to know about your emails?")
             else:
-                response_text = generate_response(user_conversations[sender], incoming_msg)
-                user_conversations[sender] += f"\nUser: {incoming_msg}\nAssistant: {response_text}"
+                try:
+                    response_text = generate_response(user_conversations[sender], incoming_msg)
+                    # Truncate conversation history if it gets too long
+                    conversation_entry = f"\nUser: {incoming_msg}\nAssistant: {response_text}"
+                    if len(user_conversations[sender]) + len(conversation_entry) > 5000:
+                        # Keep only the last 5000 characters
+                        user_conversations[sender] = user_conversations[sender][-2500:] + conversation_entry
+                    else:
+                        user_conversations[sender] += conversation_entry
+                except Exception as e:
+                    logger.error(f"Error generating response: {str(e)}")
+                    response_text = "I apologize, but I encountered an error processing your request. Please try again."
 
         # Send the response using Twilio client
         success = send_whatsapp_message(sender_number, response_text)
@@ -116,7 +158,6 @@ def test():
 if __name__ == "__main__":
     # Verify Twilio credentials on startup
     try:
-        # Test the Twilio client
         client.api.accounts(TWILIO_ACCOUNT_SID).fetch()
         logger.info("Twilio credentials verified successfully!")
     except Exception as e:
@@ -124,20 +165,15 @@ if __name__ == "__main__":
         logger.error("Please check your TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN")
         exit(1)
         
-    # Ensure initial email load
-    if get_email_count() == 0:
-        print("Loading initial emails...")
-        initial_emails = fetch_recent_emails()
+    # Initial email load (20 most recent)
+    print("Loading initial emails...")
+    initial_emails = fetch_recent_emails(max_emails=20)
+    if initial_emails:
         for i, email in enumerate(initial_emails):
-            email_text = f"""
-Subject: {email['subject']}
-From: {email['sender']}
-Date: {email['date']}
-Body:
-{email['body']}
-"""
             doc_id = f"email_{i}"
-            add_document_to_vector_db(doc_id, email_text)
-        print(f"Loaded {len(initial_emails)} emails into the database.")
+            add_document_to_vector_db(doc_id, email)
+        print(f"Loaded {len(initial_emails)} recent emails into the database.")
+    else:
+        print("No emails found.")
     
     app.run(debug=True, port=5000) 
