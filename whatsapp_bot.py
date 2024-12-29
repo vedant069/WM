@@ -81,33 +81,58 @@ def split_long_message(message, limit=1500):
 def send_whatsapp_message(to_number, message):
     """Send WhatsApp message using Twilio client with support for long messages"""
     try:
+        # Ensure message is not empty
+        if not message or message.isspace():
+            message = "No response generated."
+        
+        # Add logging to track message content
+        logger.debug(f"Attempting to send message to {to_number}: {message[:100]}...")
+        
         # Split long messages into chunks
         message_chunks = split_long_message(message)
         
-        # Send each chunk separately
+        responses = []
         for chunk in message_chunks:
-            message = client.messages.create(
-                from_=TWILIO_PHONE_NUMBER,
-                body=chunk,
-                to=f"whatsapp:{to_number}"
-            )
-            logger.debug(f"Message chunk sent successfully: {message.sid}")
+            # Ensure the number format is correct
+            formatted_number = to_number if to_number.startswith('whatsapp:') else f"whatsapp:{to_number}"
+            
+            # Add error handling for message sending
+            try:
+                message = client.messages.create(
+                    from_=TWILIO_PHONE_NUMBER,
+                    body=chunk,
+                    to=formatted_number
+                )
+                logger.info(f"Message sent successfully. SID: {message.sid}, Status: {message.status}")
+                responses.append(message)
+            except Exception as e:
+                logger.error(f"Failed to send message chunk: {str(e)}")
+                raise
         
         return True
     except Exception as e:
-        logger.error(f"Error sending message: {str(e)}")
+        logger.error(f"Error in send_whatsapp_message: {str(e)}")
         return False
 
 @app.route("/webhook", methods=['POST'])
 def webhook():
     try:
+        # Add more detailed logging
+        logger.info(f"Received webhook request: {request.values}")
+        
         incoming_msg = request.values.get('Body', '').lower()
         sender = request.values.get('From', '')
+        
+        if not sender or not incoming_msg:
+            logger.error("Missing sender or message content")
+            return str(MessagingResponse())
+            
         sender_number = sender.replace('whatsapp:', '')
         
-        logger.debug(f"Received message: '{incoming_msg}' from {sender}")
+        logger.info(f"Processing message: '{incoming_msg}' from {sender}")
         
-        # Handle the message and generate response
+        # Generate response
+        response_text = None
         if incoming_msg == 'refresh':
             response_text = refresh_emails()
         elif incoming_msg == 'clear':
@@ -125,30 +150,33 @@ def webhook():
             else:
                 try:
                     response_text = generate_response(user_conversations[sender], incoming_msg)
-                    # Truncate conversation history if it gets too long
-                    conversation_entry = f"\nUser: {incoming_msg}\nAssistant: {response_text}"
-                    if len(user_conversations[sender]) + len(conversation_entry) > 5000:
-                        # Keep only the last 5000 characters
-                        user_conversations[sender] = user_conversations[sender][-2500:] + conversation_entry
-                    else:
-                        user_conversations[sender] += conversation_entry
                 except Exception as e:
                     logger.error(f"Error generating response: {str(e)}")
-                    response_text = "I apologize, but I encountered an error processing your request. Please try again."
+                    response_text = "I apologize, but I encountered an error. Please try again."
 
-        # Send the response using Twilio client
+        # Ensure we have a response
+        if not response_text:
+            response_text = "I apologize, but I couldn't generate a response."
+
+        # Send response
+        logger.info(f"Sending response to {sender_number}")
         success = send_whatsapp_message(sender_number, response_text)
         
         if not success:
-            logger.error("Failed to send message via Twilio client")
-            
-        # Still return a TwiML response
-        resp = MessagingResponse()
-        return str(resp)
+            logger.error("Failed to send WhatsApp message")
+            # Create a basic TwiML response as fallback
+            resp = MessagingResponse()
+            resp.message("Sorry, there was an error sending the message.")
+            return str(resp)
+        
+        # Return empty TwiML response since we've already sent the message
+        return str(MessagingResponse())
         
     except Exception as e:
-        logger.error(f"Error in webhook: {str(e)}")
-        return str(MessagingResponse())
+        logger.error(f"Webhook error: {str(e)}")
+        resp = MessagingResponse()
+        resp.message("An error occurred. Please try again.")
+        return str(resp)
 
 # Add a test route
 @app.route("/test", methods=['GET'])

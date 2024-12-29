@@ -5,6 +5,7 @@ import numpy as np
 import PyPDF2
 import time
 from datetime import datetime, timedelta
+from get_emails import fetch_recent_emails
 
 # Initialize clients and models
 genai.configure(api_key="AIzaSyDVgLmMTa4ycj7muEtUWH20O6LgGQsi6sQ")
@@ -34,7 +35,7 @@ def clear_vector_db():
 
 def chunk_emails_by_time(emails, chunk_size=3000):
     """
-    Create large chunks of emails grouped by recency
+    Create time-based chunks of emails with efficient metadata
     
     Args:
         emails (list): List of email dictionaries
@@ -47,10 +48,16 @@ def chunk_emails_by_time(emails, chunk_size=3000):
     current_chunk = []
     current_chunk_size = 0
     
+    # Track time ranges for each chunk
+    chunk_start_time = None
+    chunk_end_time = None
+    
     for email in sorted_emails:
-        # Format single email
+        email_timestamp = float(email['timestamp'])
+        
+        # Format single email with clear temporal markers
         email_text = f"""
-Time: {datetime.fromtimestamp(float(email['timestamp'])).strftime('%Y-%m-%d %I:%M %p')}
+[Email from {datetime.fromtimestamp(email_timestamp).strftime('%Y-%m-%d %I:%M %p')}]
 From: {email['sender']}
 Subject: {email['subject']}
 ---
@@ -59,26 +66,39 @@ Subject: {email['subject']}
 """
         email_size = len(email_text)
         
+        # Start new chunk if size limit reached
         if current_chunk_size + email_size > chunk_size and current_chunk:
-            # Create chunk with metadata
-            chunk_text = "\n".join(current_chunk)
             chunks_with_metadata.append({
-                'text': chunk_text,
-                'timestamp': float(sorted_emails[len(chunks_with_metadata)]['timestamp']),
+                'text': "\n".join(current_chunk),
+                'timestamp': chunk_start_time,  # Most recent timestamp
+                'date_range': {
+                    'start': chunk_end_time,    # Oldest email in chunk
+                    'end': chunk_start_time     # Newest email in chunk
+                },
                 'emails_count': len(current_chunk)
             })
             current_chunk = []
             current_chunk_size = 0
+            chunk_start_time = None
+            chunk_end_time = None
+        
+        # Update chunk metadata
+        if chunk_start_time is None:
+            chunk_start_time = email_timestamp
+        chunk_end_time = email_timestamp
         
         current_chunk.append(email_text)
         current_chunk_size += email_size
     
-    # Add remaining emails as last chunk
+    # Add remaining emails as final chunk
     if current_chunk:
-        chunk_text = "\n".join(current_chunk)
         chunks_with_metadata.append({
-            'text': chunk_text,
-            'timestamp': float(sorted_emails[len(chunks_with_metadata)]['timestamp']),
+            'text': "\n".join(current_chunk),
+            'timestamp': chunk_start_time,
+            'date_range': {
+                'start': chunk_end_time,
+                'end': chunk_start_time
+            },
             'emails_count': len(current_chunk)
         })
     
@@ -135,40 +155,65 @@ def add_document_to_vector_db(doc_id, email_data):
     embeddings.extend(doc_embeddings)
     faiss_index.add(np.array(doc_embeddings))
 
-def retrieve_relevant_chunks(query, top_k=3):  # Reduced top_k since chunks are larger
+def retrieve_relevant_chunks(query, top_k=3):
     """
-    Retrieve relevant chunks with improved time-aware ranking.
+    Enhanced retrieval with time-aware ranking
     """
     query_embedding = embeddingModel.encode([query])
-    distances, indices = faiss_index.search(query_embedding, top_k * 2)
+    distances, indices = faiss_index.search(query_embedding, top_k * 2)  # Get more candidates for reranking
     
-    # Get candidate chunks with their metadata
+    # Prepare candidates with temporal scoring
     candidates = []
-    current_time = datetime.now()
+    current_time = time.time()
+    
+    # Time-related keywords for query understanding
+    time_keywords = {
+        'recent': 3,      # Last 3 days
+        'today': 1,       # Last 24 hours
+        'this week': 7,   # Last 7 days
+        'latest': 2       # Last 2 days
+    }
+    
+    # Determine if this is a time-focused query
+    time_focus = None
+    query_lower = query.lower()
+    for keyword, days in time_keywords.items():
+        if keyword in query_lower:
+            time_focus = days
+            break
     
     for idx in indices[0]:
         chunk = chunks[idx]
         metadata = chunk_metadata[idx]
         timestamp = metadata['timestamp']
         
+        # Calculate time decay score (exponential decay)
+        days_old = (current_time - timestamp) / (24 * 3600)
+        time_score = np.exp(-days_old / 7)  # 7-day half-life
+        
+        # Calculate semantic similarity score
+        semantic_score = 1.0 / (1.0 + float(distances[0][indices[0].tolist().index(idx)]))
+        
+        # Adjust scoring based on query type
+        if time_focus:
+            # For time-focused queries, heavily weight recency
+            final_score = 0.8 * time_score + 0.2 * semantic_score
+            # Filter out chunks older than the time focus
+            if days_old > time_focus:
+                continue
+        else:
+            # For content-focused queries, balance between relevance and recency
+            final_score = 0.4 * time_score + 0.6 * semantic_score
+        
         candidates.append({
             'text': chunk,
-            'score': float(distances[0][indices[0].tolist().index(idx)]),
+            'score': final_score,
             'timestamp': timestamp,
             'emails_count': metadata['emails_count']
         })
     
-    # Time-aware ranking
-    query_lower = query.lower()
-    if 'latest' in query_lower or 'recent' in query_lower:
-        # Prioritize most recent chunks
-        candidates.sort(key=lambda x: (-float(x['timestamp']), x['score']))
-    else:
-        # Balance between relevance and recency
-        for candidate in candidates:
-            time_factor = 1.0 / (1.0 + (time.time() - float(candidate['timestamp'])) / 86400)
-            candidate['score'] = candidate['score'] * (0.7 + 0.3 * time_factor)
-        candidates.sort(key=lambda x: x['score'])
+    # Sort by final score
+    candidates.sort(key=lambda x: x['score'], reverse=True)
     
     # Return top_k chunks after reranking
     return [format_chunk_for_response(c) for c in candidates[:top_k]]
