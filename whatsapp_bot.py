@@ -58,13 +58,34 @@ def send_whatsapp_message(to_number, message):
 @app.route("/webhook", methods=['POST'])
 def webhook():
     try:
-        incoming_msg = request.values.get('Body', '')
+        incoming_msg = request.values.get('Body', '').strip().lower()
         sender = request.values.get('From', '')
         
         logger.info(f"Received message: '{incoming_msg}' from {sender}")
         
         if not sender or not incoming_msg:
             logger.error("Missing sender or message content")
+            return str(MessagingResponse())
+        
+        # Handle special commands
+        if incoming_msg == "refresh":
+            logger.info("Refreshing email database...")
+            clear_vector_db()
+            emails = fetch_recent_emails()
+            if emails:
+                stored_count = add_document_to_vector_db("recent_emails", emails)
+                response = f"✨ Database refreshed! Loaded {stored_count} recent emails."
+            else:
+                response = "❌ No recent emails found to refresh."
+            send_whatsapp_message(sender, response)
+            return str(MessagingResponse())
+            
+        if incoming_msg == "clear":
+            logger.info("Clearing email database...")
+            clear_vector_db()
+            user_conversations[sender] = ""  # Clear conversation history
+            response = "🧹 Database and conversation history cleared!"
+            send_whatsapp_message(sender, response)
             return str(MessagingResponse())
         
         # Check if user is in composition mode
@@ -79,7 +100,7 @@ def webhook():
             return str(MessagingResponse())
         
         # Handle compose command
-        if incoming_msg.lower().strip() == "compose":
+        if incoming_msg == "compose":
             logger.info(f"Starting composition for {sender}")
             response, draft_id = handle_compose_request(incoming_msg, email_composer)
             if draft_id:
