@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 
 # Gmail IMAP configuration
 IMAP_SERVER = "imap.gmail.com"
-EMAIL_USER = "interns@pluginlive.com"  # Replace with your email
-EMAIL_PASS = "ptdo obzr lobc qrke"     # Replace with your app password
+EMAIL_USER = "vedantnadhe069@gmail.com"  # Replace with your email
+EMAIL_PASS = "jkns dsef asfp imhr"     # Replace with your app password
 
 # Step 1: Connect to Gmail IMAP server
 def connect_to_gmail():
@@ -19,9 +19,9 @@ def connect_to_gmail():
         return None
 
 # Step 2: Fetch recent emails
-def fetch_recent_emails(max_emails=20):
+def fetch_recent_emails(max_emails=50):
     """
-    Fetch only the 20 most recent emails
+    Fetch only emails from today and yesterday, up to max_emails
     """
     mail = connect_to_gmail()
     if not mail:
@@ -29,12 +29,14 @@ def fetch_recent_emails(max_emails=20):
 
     try:
         mail.select("inbox")
-        # Get all email IDs
-        status, messages = mail.search(None, 'ALL')
+        # Calculate date for 2 days ago
+        two_days_ago = (datetime.now() - timedelta(days=2)).strftime("%d-%b-%Y")
+        # Search for emails from the last 2 days
+        status, messages = mail.search(None, f'SINCE {two_days_ago}')
         email_ids = messages[0].split()
         
-        # Get only the most recent 20 emails
-        recent_email_ids = email_ids[-max_emails:]
+        # Get only the most recent emails if we have more than max_emails
+        recent_email_ids = email_ids[-max_emails:] if len(email_ids) > max_emails else email_ids
         
         email_data = []
         current_time = datetime.now()

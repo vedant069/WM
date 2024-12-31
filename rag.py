@@ -243,9 +243,10 @@ def add_document_to_vector_db(doc_id, email_data):
         
         for i, chunk_data in enumerate(doc_chunks):
             chunk_id = f"{doc_id}_{chunk_data['status']}"
+            chunk_idx = len(chunks)
             chunks.append(chunk_data['text'])
             
-            chunk_metadata[len(chunks)-1] = {
+            meta = {
                 'doc_id': doc_id,
                 'chunk_id': chunk_id,
                 'timestamp': chunk_data['timestamp'],
@@ -253,6 +254,15 @@ def add_document_to_vector_db(doc_id, email_data):
                 'date': chunk_data['date'],
                 'emails_count': chunk_data['emails_count']
             }
+            chunk_metadata[chunk_idx] = meta
+            
+            # Update metadata_index with the chunk
+            metadata_index.add_email(
+                chunk_id=chunk_idx,
+                timestamp=chunk_data['timestamp'],
+                date=chunk_data['date'],
+                emails_count=chunk_data['emails_count']
+            )
         
         embeddings.extend(doc_embeddings)
         faiss_index.add(np.array(doc_embeddings))
@@ -358,18 +368,99 @@ def retrieve_relevant_chunks(query, top_k=3):
 
 def generate_response(conversation_history, question):
     """
-    Generate a response with improved formatting and readability.
+    Generate a response with improved formatting and readability
     """
     try:
-        # Get relevant chunks with error handling
+        # Handle greeting and simple queries
+        greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
+        if any(keyword in question.lower() for keyword in greeting_keywords):
+            return f"""📬 EMAIL ASSISTANT
+===================
+Hello! 👋 I'm your email assistant. I can help you:
+• Check your recent emails 📨
+• Find specific emails 🔍
+• Get email summaries 📝
+• Compose new emails ✍️
+
+What would you like to do?
+
+💡 Commands:
+• Type 'compose' to write a new email
+• Type 'refresh' to check for new emails
+• Type 'clear' to reset conversation
+==================="""
+
+        # Handle compose command explicitly
+        if question.lower().strip() == "compose":
+            return f"""📬 EMAIL ASSISTANT
+===================
+Let's compose a new email! 📝
+
+Who would you like to send the email to?
+(Please enter the recipient's email address)
+
+💡 Commands:
+• Type 'cancel' to cancel composition
+• Type 'clear' to reset conversation
+==================="""
+
+        # Handle help-related queries
+        help_keywords = ['help', 'what can you do', 'how to', 'commands']
+        if any(keyword in question.lower() for keyword in help_keywords):
+            return f"""📬 EMAIL ASSISTANT
+===================
+I can help you with the following:
+
+1. 📨 Email Queries:
+   • "Show my recent emails"
+   • "Any emails from [sender]"
+   • "Emails about [subject]"
+   • "What emails did I get today?"
+   • "Show yesterday's emails"
+
+2. 🔍 Specific Searches:
+   • "Find emails about [topic]"
+   • "Show emails from [person]"
+   • "Any important emails?"
+
+3. 🕒 Time-based Queries:
+   • "Today's emails"
+   • "Yesterday's messages"
+   • "Recent emails"
+
+💡 Commands:
+• Type 'refresh' to check for new emails
+• Type 'clear' to reset conversation
+==================="""
+
+        # Get relevant chunks
         relevant_chunks = retrieve_relevant_chunks(question)
         
         if not relevant_chunks:
-            return "I couldn't find any relevant emails for your query. Try rephrasing or use 'refresh' to check for new emails."
+            return f"""📬 EMAIL ASSISTANT
+===================
+I couldn't find any emails matching your query. 
+
+Would you like to:
+• Try rephrasing your question
+• Type 'refresh' to check for new emails
+• Type 'compose' to write a new email
+
+💡 Commands:
+• Type 'compose' to write a new email
+• Type 'refresh' to check for new emails
+• Type 'clear' to reset conversation
+==================="""
         
         combined_text = '\n\n'.join(relevant_chunks)
         
-        prompt = f"""Based on the following email contents and conversation history, provide a clear and well-formatted response.
+        # Modify prompt based on query type
+        if 'recent' in question.lower() or 'show' in question.lower():
+            prompt_style = "full_summary"
+        else:
+            prompt_style = "focused_response"
+
+        prompt = f"""Based on the following email contents and user question, provide a conversational response.
 
 CONVERSATION HISTORY:
 {conversation_history}
@@ -379,25 +470,24 @@ RELEVANT EMAIL CONTENTS:
 
 QUESTION: {question}
 
-Please format your response using this structure:
-📥 EMAIL SUMMARY ({datetime.now().strftime('%Y-%m-%d')})
--------------------
+Response Style: {prompt_style}
 
-For each email:
-1. 🕒 Time: [HH:MM AM/PM]
-2. 👤 From: [Sender]
-3. 📌 Subject: [Subject]
-4. 📝 Summary: [Brief summary in 1-2 lines]
--------------------
+If prompt_style is "full_summary":
+Format as a clear email summary with:
+- 🕒 Time
+- 👤 From
+- 📌 Subject
+- 📝 Brief summary
+- Use emojis for important (❗) or attachment (📎) indicators
 
-Additional formatting rules:
-- Group emails by time period (e.g., "Recent Emails", "Earlier Today", etc.)
-- List emails chronologically, newest first
-- Use bullet points for clarity
-- Keep summaries concise but informative
-- Highlight important details with emojis
-- Add "❗" for seemingly important emails
-- Add "📎" if there are attachments mentioned"""
+If prompt_style is "focused_response":
+- Provide a conversational response focused specifically on answering the user's question
+- Only include relevant email details
+- Be concise but informative
+- Use natural language
+- Add context when needed
+
+Always maintain a helpful and friendly tone."""
 
         response = model.generate_content(prompt, generation_config={
             'max_output_tokens': 3000,
@@ -407,7 +497,6 @@ Additional formatting rules:
         if not response or not response.text:
             return "I apologize, but I couldn't generate a proper response. Please try again."
         
-        # Add a header to the response
         formatted_response = f"""📬 EMAIL ASSISTANT
 ===================
 {response.text}
@@ -415,6 +504,7 @@ Additional formatting rules:
 💡 Commands:
 • Type 'refresh' to check for new emails
 • Type 'clear' to reset conversation
+• Type 'compose' to write a new email
 ==================="""
         
         return formatted_response
@@ -476,3 +566,15 @@ def debug_database_state():
         print(f"Chunk {idx}: Date={date}, Status={meta.get('status', 'unknown')}, Emails={meta.get('emails_count', 0)}")
     print("\nEmail Status:")
     print(get_email_status())
+    
+    # Add more detailed debugging
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    print("\nDetailed Email Analysis:")
+    print(f"Today's date: {today}")
+    print(f"Yesterday's date: {yesterday}")
+    
+    today_chunks = metadata_index.get_chunks_by_date(today)
+    yesterday_chunks = metadata_index.get_chunks_by_date(yesterday)
+    print(f"\nToday's chunks: {len(today_chunks)}")
+    print(f"Yesterday's chunks: {len(yesterday_chunks)}")
